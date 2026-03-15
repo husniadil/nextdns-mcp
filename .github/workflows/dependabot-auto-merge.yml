@@ -22,7 +22,7 @@ jobs:
         id: check-workflows
         with:
           script: |
-            const required_workflows = ['Unit Tests', 'E2E MCP Gateway'];
+            const required_workflows = ['Unit Tests', 'E2E MCP Gateway', 'CodeQL'];
             const pr_number = context.issue.number;
             const max_wait_minutes = 20;
             const check_interval_seconds = 30;
@@ -116,32 +116,8 @@ jobs:
               reason: 'Timeout waiting for workflows to complete' 
             };
 
-      - name: Check if should skip
-        if: fromJSON(steps.check-workflows.outputs.result).success == true
-        id: skip-check
-        run: |
-          PR_TITLE='${{ fromJSON(steps.check-workflows.outputs.result).pr_title }}'
-          
-          # Check if this is a Python version update (exclude from auto-merge)
-          if echo "$PR_TITLE" | grep -qi "bump python from"; then
-            echo "should_skip=true" >> $GITHUB_OUTPUT
-            echo "skip_reason=Python version updates require manual review" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Check if this is a uv/pip dependency (Python package)
-          if ! echo "$PR_TITLE" | grep -q "deps(uv)"; then
-            echo "should_skip=true" >> $GITHUB_OUTPUT
-            echo "skip_reason=Not a Python package update" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "should_skip=false" >> $GITHUB_OUTPUT
-
       - name: Approve and enable auto-merge
-        if: |
-          fromJSON(steps.check-workflows.outputs.result).success == true &&
-          steps.skip-check.outputs.should_skip == 'false'
+        if: fromJSON(steps.check-workflows.outputs.result).success == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -155,23 +131,11 @@ jobs:
             --body "✅ Auto-approved: All workflows passed
           
           - Unit Tests: ✅ Passed (≥95% overall coverage, all files ≥93%)
-          - E2E Tests: ✅ Passed (100% of tools tested)"
+          - E2E Tests: ✅ Passed (100% of tools tested)
+          - CodeQL: ✅ Passed"
           
           # Enable auto-merge
           gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
-
-      - name: Comment on skipped PR
-        if: |
-          fromJSON(steps.check-workflows.outputs.result).success == true &&
-          steps.skip-check.outputs.should_skip == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUMBER='${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}'
-          SKIP_REASON='${{ steps.skip-check.outputs.skip_reason }}'
-          
-          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
-            --body "⚠️ Auto-merge skipped: $SKIP_REASON"
 
       - name: Comment on failed workflows
         if: fromJSON(steps.check-workflows.outputs.result).success == false
