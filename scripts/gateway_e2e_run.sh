@@ -178,43 +178,49 @@ if [ "${INJECT_API_KEY}" = "true" ]; then
     log_info "Injecting API key into catalog env section"
 
     # Add NEXTDNS_API_KEY to the env section of the catalog.
-    cd ${PROJECT_DIR}
-    uv run python3 -c "
-import yaml
+    # NOTE: Keep the key out of the command line (ps-visible) and avoid brittle shell interpolation.
+    if (
+        cd "${PROJECT_DIR}" \
+        && TEMP_CATALOG="${TEMP_CATALOG}" NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" uv run python3 - <<'PY'
+import os
 import sys
 
-with open('${TEMP_CATALOG}', 'r') as f:
+import yaml
+
+temp_catalog = os.environ["TEMP_CATALOG"]
+api_key = os.environ["NEXTDNS_API_KEY"]
+
+with open(temp_catalog, "r", encoding="utf-8") as f:
     catalog = yaml.safe_load(f)
 
-if 'registry' in catalog and 'nextdns' in catalog['registry']:
-    if 'env' not in catalog['registry']['nextdns']:
-        catalog['registry']['nextdns']['env'] = []
-
-    env_list = catalog['registry']['nextdns']['env']
-    found = False
-    for env_var in env_list:
-        if env_var.get('name') == 'NEXTDNS_API_KEY':
-            env_var['value'] = '${NEXTDNS_API_KEY}'
-            env_var['description'] = env_var.get('description') or 'NextDNS API key (injected at runtime)'
-            found = True
-            break
-
-    if not found:
-        env_list.insert(0, {
-            'name': 'NEXTDNS_API_KEY',
-            'value': '${NEXTDNS_API_KEY}',
-            'description': 'NextDNS API key (injected at runtime)'
-        })
-
-    with open('${TEMP_CATALOG}', 'w') as f:
-        yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
-
-    sys.exit(0)
-else:
+registry = catalog.get("registry", {}) if isinstance(catalog, dict) else {}
+nextdns = registry.get("nextdns") if isinstance(registry, dict) else None
+if not isinstance(nextdns, dict):
     sys.exit(1)
-"
 
-    if [ $? -eq 0 ]; then
+env_list = nextdns.setdefault("env", [])
+if not isinstance(env_list, list):
+    sys.exit(1)
+
+for env_var in env_list:
+    if isinstance(env_var, dict) and env_var.get("name") == "NEXTDNS_API_KEY":
+        env_var["value"] = api_key
+        env_var["description"] = env_var.get("description") or "NextDNS API key (injected at runtime)"
+        break
+else:
+    env_list.insert(
+        0,
+        {
+            "name": "NEXTDNS_API_KEY",
+            "value": api_key,
+            "description": "NextDNS API key (injected at runtime)",
+        },
+    )
+
+with open(temp_catalog, "w", encoding="utf-8") as f:
+    yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
+PY
+    ); then
         log_success "API key injected into catalog"
     else
         log_error "Failed to inject API key into catalog"
