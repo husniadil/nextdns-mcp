@@ -14,7 +14,6 @@ from nextdns_mcp.server import (
     create_access_denied_response,
     create_nextdns_client,
     load_openapi_spec,
-    mcp_server,
 )
 
 
