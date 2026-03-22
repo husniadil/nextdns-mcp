@@ -9,9 +9,14 @@ permissions:
 
 jobs:
   bump-version:
+    # Only run on specific bump labels and avoid forks or already closed PRs
     if: |
-      contains(github.event.label.name, 'bump-') &&
-      github.event.pull_request.state == 'open'
+      (github.event.label.name == 'bump-patch' || 
+       github.event.label.name == 'bump-minor' || 
+       github.event.label.name == 'bump-major') &&
+      github.event.pull_request.state == 'open' &&
+      !github.event.pull_request.head.repo.fork &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR Branch
@@ -26,52 +31,71 @@ jobs:
           ref: main
           path: main-ref
 
-      - name: Extract Current Version
-        id: get_current
+      - name: Calculate and Update Version
+        id: update_version
         run: |
-          VERSION=$(grep "^version =" main-ref/pyproject.toml | cut -d'"' -f2)
-          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Current Version on main: $VERSION"
-
-      - name: Calculate Next Version
-        id: get_next
-        run: |
-          CURRENT="${{ steps.get_current.outputs.current_version }}"
-          LABEL="${{ github.event.label.name }}"
+          set -euo pipefail
           
-          # Use Python to handle version increment reliably
-          NEXT=$(python -c "
-          v = '$CURRENT'.split('.')
-          major, minor, patch = int(v[0]), int(v[1]), int(v[2])
-          if '$LABEL' == 'bump-major':
+          python3 << 'PY'
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          LABEL = "${{ github.event.label.name }}"
+          MAIN_ROOT = Path("main-ref")
+          PR_ROOT = Path(".")
+
+          # 1. Get current version from main (baseline)
+          with (MAIN_ROOT / "pyproject.toml").open("rb") as f:
+              data = tomllib.load(f)
+              current_v = data["project"]["version"]
+          
+          # 2. Calculate next version
+          major, minor, patch = map(int, current_v.split('.'))
+          if LABEL == 'bump-major':
               major += 1; minor = 0; patch = 0
-          elif '$LABEL' == 'bump-minor':
+          elif LABEL == 'bump-minor':
               minor += 1; patch = 0
-          elif '$LABEL' == 'bump-patch':
+          elif LABEL == 'bump-patch':
               patch += 1
-          print(f'{major}.{minor}.{patch}')
-          ")
-          echo "next_version=$NEXT" >> $GITHUB_OUTPUT
-          echo "Next Version: $NEXT"
+          next_v = f"{major}.{minor}.{patch}"
+          
+          print(f"Bumping {current_v} -> {next_v} (due to {LABEL})")
 
-      - name: Update Files
-        run: |
-          NEXT="${{ steps.get_next.outputs.next_version }}"
-          echo "Updating files to version $NEXT..."
+          # 3. Update files
+          def update_file(path, pattern, replacement):
+              p = PR_ROOT / path
+              content = p.read_text()
+              new_content = re.sub(pattern, replacement, content)
+              if content != new_content:
+                  p.write_text(new_content)
+                  print(f"✅ Updated {path}")
+              else:
+                  print(f"⚠️ No change needed for {path}")
+
+          update_file("pyproject.toml", r'^version = ".*"', f'version = "{next_v}"')
+          update_file("src/nextdns_mcp/__init__.py", r'__version__ = ".*"', f'__version__ = "{next_v}"')
+          update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=".*"', f'LABEL org.opencontainers.image.version="{next_v}"')
           
-          # Update pyproject.toml
-          sed -i "s/^version = \".*\"/version = \"$NEXT\"/" pyproject.toml
+          with open("next_version.txt", "w") as f:
+              f.write(next_v)
+          PY
           
-          # Update __init__.py
-          sed -i "s/__version__ = \".*\"/__version__ = \"$NEXT\"/" src/nextdns_mcp/__init__.py
-          
-          # Update Dockerfile
-          sed -i "s/LABEL org.opencontainers.image.version=\".*\"/LABEL org.opencontainers.image.version=\"$NEXT\"/" Dockerfile
+          NEXT_V=$(cat next_version.txt)
+          echo "next_version=$NEXT_V" >> $GITHUB_OUTPUT
 
       - name: Commit and Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile
-          git commit -m "chore: bump version to ${{ steps.get_next.outputs.next_version }} (${{ github.event.label.name }})"
+          
+          # Check if there are any staged changes before committing
+          if git diff --cached --quiet; then
+            echo "No changes to commit; skipping commit and push."
+            exit 0
+          fi
+          
+          git commit -m "chore: bump version to ${{ steps.update_version.outputs.next_version }} (${{ github.event.label.name }})"
           git push origin ${{ github.head_ref }}

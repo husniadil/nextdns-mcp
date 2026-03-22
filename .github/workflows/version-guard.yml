@@ -15,15 +15,32 @@ jobs:
     steps:
       - name: Validate Labels
         run: |
+          # Use exact matching against the labels array
           LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
           echo "Current labels: $LABELS"
           
-          HAS_RELEASE_LABEL=false
-          if echo "$LABELS" | grep -qE "bump-patch|bump-minor|bump-major|no-release"; then
-            HAS_RELEASE_LABEL=true
+          # Check for mutual exclusivity and existence
+          HAS_BUMP_PATCH=$(echo "$LABELS" | grep -q '"bump-patch"' && echo true || echo false)
+          HAS_BUMP_MINOR=$(echo "$LABELS" | grep -q '"bump-minor"' && echo true || echo false)
+          HAS_BUMP_MAJOR=$(echo "$LABELS" | grep -q '"bump-major"' && echo true || echo false)
+          HAS_NO_RELEASE=$(echo "$LABELS" | grep -q '"no-release"' && echo true || echo false)
+          
+          BUMP_COUNT=0
+          [ "$HAS_BUMP_PATCH" = "true" ] && BUMP_COUNT=$((BUMP_COUNT+1))
+          [ "$HAS_BUMP_MINOR" = "true" ] && BUMP_COUNT=$((BUMP_COUNT+1))
+          [ "$HAS_BUMP_MAJOR" = "true" ] && BUMP_COUNT=$((BUMP_COUNT+1))
+          
+          if [ "$HAS_NO_RELEASE" = "true" ] && [ $BUMP_COUNT -gt 0 ]; then
+            echo "❌ Error: 'no-release' and 'bump-*' labels are mutually exclusive. Please remove one."
+            exit 1
           fi
           
-          if [ "$HAS_RELEASE_LABEL" = "false" ]; then
+          if [ $BUMP_COUNT -gt 1 ]; then
+            echo "❌ Error: Multiple 'bump-*' labels found. Please use only one."
+            exit 1
+          fi
+          
+          if [ "$HAS_NO_RELEASE" = "false" ] && [ $BUMP_COUNT -eq 0 ]; then
             echo "❌ Error: No release label found!"
             echo "Please add one of the following labels to this PR:"
             echo "- bump-patch"
@@ -33,7 +50,7 @@ jobs:
             exit 1
           fi
           
-          echo "✅ Valid release label found."
+          echo "✅ Valid release label configuration found."
 
   check-sync:
     name: Verify Version Sync
@@ -65,37 +82,68 @@ jobs:
       - name: Validate Versions
         if: steps.bypass.outputs.has_label != 'true'
         run: |
-          echo "### 🔍 Extracting Versions..."
+          set -euo pipefail
+          echo "### 🔍 Extracting and Validating Versions..."
           
-          PR_PYPROJECT=$(grep "^version =" pr/pyproject.toml | cut -d'"' -f2)
-          PR_INIT=$(grep "__version__ =" pr/src/nextdns_mcp/__init__.py | cut -d'"' -f2)
-          PR_DOCKER=$(grep "LABEL org.opencontainers.image.version=" pr/Dockerfile | cut -d'"' -f2)
-          MAIN_VERSION=$(grep "^version =" main/pyproject.toml | cut -d'"' -f2)
+          python3 << 'PY'
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
 
-          echo "Main Version: $MAIN_VERSION"
-          echo "PR pyproject.toml: $PR_PYPROJECT"
-          echo "PR __init__.py: $PR_INIT"
-          echo "PR Dockerfile: $PR_DOCKER"
+          def get_pyproject_v(root):
+              p = Path(root) / "pyproject.toml"
+              with p.open("rb") as f:
+                  return tomllib.load(f)["project"]["version"]
 
-          FAILED=0
+          def get_init_v(root):
+              p = Path(root) / "src/nextdns_mcp/__init__.py"
+              content = p.read_text()
+              match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+              return match.group(1) if match else None
 
-          # 1. Check if version was incremented
-          if [ "$PR_PYPROJECT" == "$MAIN_VERSION" ]; then
-            echo "❌ Error: Version in pyproject.toml has not been incremented from $MAIN_VERSION."
-            FAILED=1
-          fi
+          def get_docker_v(root):
+              p = Path(root) / "Dockerfile"
+              content = p.read_text()
+              match = re.search(r'LABEL org\.opencontainers\.image\.version=["\']([^"\']+)["\']', content)
+              return match.group(1) if match else None
 
-          # 2. Check for internal consistency
-          if [ "$PR_PYPROJECT" != "$PR_INIT" ] || [ "$PR_PYPROJECT" != "$PR_DOCKER" ]; then
-            echo "❌ Error: Version mismatch between files!"
-            FAILED=1
-          fi
+          def is_greater(v1, v2):
+              # Simple semver comparison for MAJOR.MINOR.PATCH
+              t1 = [int(x) for x in v1.split('.')]
+              t2 = [int(x) for x in v2.split('.')]
+              return t1 > t2
 
-          if [ $FAILED -eq 1 ]; then
-            echo ""
-            echo "🚨 Version check failed! Use a 'bump-*' label to auto-fix (coming soon) or update manually."
-            exit 1
-          fi
+          try:
+              main_v = get_pyproject_v("main")
+              pr_py = get_pyproject_v("pr")
+              pr_init = get_init_v("pr")
+              pr_docker = get_docker_v("pr")
+          except Exception as e:
+              print(f"❌ Error extracting versions: {e}")
+              sys.exit(1)
 
-          echo ""
-          echo "✅ All version strings are synced and incremented ($PR_PYPROJECT)."
+          print(f"Main Version: {main_v}")
+          print(f"PR pyproject.toml: {pr_py}")
+          print(f"PR __init__.py: {pr_init}")
+          print(f"PR Dockerfile: {pr_docker}")
+
+          errors = []
+          if not is_greater(pr_py, main_v):
+              errors.append(f"Version in pyproject.toml ({pr_py}) must be greater than main ({main_v}).")
+          
+          if pr_py != pr_init:
+              errors.append(f"Mismatch: pyproject.toml ({pr_py}) != __init__.py ({pr_init})")
+          
+          if pr_py != pr_docker:
+              errors.append(f"Mismatch: pyproject.toml ({pr_py}) != Dockerfile ({pr_docker})")
+
+          if errors:
+              print("\n🚨 Version Guard Failed:")
+              for err in errors:
+                  print(f"  - {err}")
+              print("\nAdd a 'bump-*' label to auto-fix or update manually.")
+              sys.exit(1)
+
+          print("\n✅ All version strings are synced and incremented.")
+          PY

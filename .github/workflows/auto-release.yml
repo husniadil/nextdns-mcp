@@ -10,12 +10,15 @@ permissions:
 
 jobs:
   release:
+    # Only run if merged and not a fork, and has exactly one valid bump label
     if: |
       github.event.pull_request.merged == true &&
+      !github.event.pull_request.head.repo.fork &&
       (
-        contains(github.event.pull_request.labels.*.name, 'bump-patch') ||
-        contains(github.event.pull_request.labels.*.name, 'bump-minor') ||
-        contains(github.event.pull_request.labels.*.name, 'bump-major')
+        (contains(github.event.pull_request.labels.*.name, 'bump-patch') ||
+         contains(github.event.pull_request.labels.*.name, 'bump-minor') ||
+         contains(github.event.pull_request.labels.*.name, 'bump-major')) &&
+        !contains(github.event.pull_request.labels.*.name, 'no-release')
       )
     runs-on: ubuntu-latest
     steps:
@@ -25,9 +28,20 @@ jobs:
       - name: Extract Project Version
         id: version
         run: |
-          VERSION=$(grep "^version =" pyproject.toml | cut -d'"' -f2)
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          echo "tag_name=v$VERSION"
+          # Use Python to reliably extract version from pyproject.toml
+          python3 << 'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          p = Path("pyproject.toml")
+          with p.open("rb") as f:
+              data = tomllib.load(f)
+              v = data["project"]["version"]
+          
+          with open("${GITHUB_OUTPUT}", "a") as f:
+              f.write(f"tag=v{v}\n")
+          PY
 
       - name: Generate Release Notes and Create Release
         uses: actions/github-script@v7
@@ -38,7 +52,22 @@ jobs:
             console.log(`Creating release for ${tagName}...`);
             
             try {
-              // 1. Generate the release notes
+              // 1. Check if release already exists to be idempotent
+              try {
+                const existing = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: tagName
+                });
+                if (existing) {
+                  console.log(`⚠️ Release ${tagName} already exists. Skipping.`);
+                  return;
+                }
+              } catch (e) {
+                // Not found, proceed
+              }
+
+              // 2. Generate the release notes
               const { data: notes } = await github.rest.repos.generateReleaseNotes({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -46,7 +75,7 @@ jobs:
                 target_commitish: 'main'
               });
               
-              // 2. Create the GitHub release
+              // 3. Create the GitHub release
               await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -55,7 +84,7 @@ jobs:
                 body: notes.body,
                 draft: false,
                 prerelease: false,
-                generate_release_notes: false // We already generated them manually
+                generate_release_notes: false
               });
               
               console.log(`✅ Successfully created release ${tagName}`);
