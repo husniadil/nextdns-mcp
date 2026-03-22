@@ -1,0 +1,80 @@
+name: Version Guard
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Verify Version Sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for bypass label
+        id: bypass
+        run: |
+          HAS_LABEL="${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}"
+          echo "has_label=$HAS_LABEL" >> $GITHUB_OUTPUT
+          if [ "$HAS_LABEL" = "true" ]; then
+            echo "✅ Bypass label 'no-release' found. Skipping checks."
+          fi
+
+      - name: Checkout main (baseline)
+        if: steps.bypass.outputs.has_label != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Checkout PR branch
+        if: steps.bypass.outputs.has_label != 'true'
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Validate Versions
+        if: steps.bypass.outputs.has_label != 'true'
+        run: |
+          echo "### 🔍 Extracting Versions..."
+          
+          # Extract versions using grep and cut for simplicity/robustness in runner
+          PR_PYPROJECT=$(grep "^version =" pr/pyproject.toml | cut -d'"' -f2)
+          PR_INIT=$(grep "__version__ =" pr/src/nextdns_mcp/__init__.py | cut -d'"' -f2)
+          PR_DOCKER=$(grep "LABEL org.opencontainers.image.version=" pr/Dockerfile | cut -d'"' -f2)
+          MAIN_VERSION=$(grep "^version =" main/pyproject.toml | cut -d'"' -f2)
+
+          echo "Main Version: $MAIN_VERSION"
+          echo "PR pyproject.toml: $PR_PYPROJECT"
+          echo "PR __init__.py: $PR_INIT"
+          echo "PR Dockerfile: $PR_DOCKER"
+
+          FAILED=0
+
+          # 1. Check if version was incremented
+          if [ "$PR_PYPROJECT" == "$MAIN_VERSION" ]; then
+            echo "❌ Error: Version in pyproject.toml has not been incremented from $MAIN_VERSION."
+            FAILED=1
+          fi
+
+          # 2. Check for internal consistency
+          if [ "$PR_PYPROJECT" != "$PR_INIT" ]; then
+            echo "❌ Error: Version mismatch! pyproject.toml ($PR_PYPROJECT) != __init__.py ($PR_INIT)"
+            FAILED=1
+          fi
+
+          if [ "$PR_PYPROJECT" != "$PR_DOCKER" ]; then
+            echo "❌ Error: Version mismatch! pyproject.toml ($PR_PYPROJECT) != Dockerfile ($PR_DOCKER)"
+            FAILED=1
+          fi
+
+          if [ $FAILED -eq 1 ]; then
+            echo ""
+            echo "🚨 Version check failed! Please update all version strings or add the 'no-release' label to the PR."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All version strings are synced and incremented ($PR_PYPROJECT)."
