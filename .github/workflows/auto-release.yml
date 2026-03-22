@@ -1,0 +1,111 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only run if merged, not a fork, and has exactly one valid bump label (and no no-release label)
+    if: |
+      github.event.pull_request.merged == true &&
+      !github.event.pull_request.head.repo.fork &&
+      !contains(github.event.pull_request.labels.*.name, 'no-release') &&
+      (
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-major')
+        ) ||
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-major')
+        ) ||
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-major') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-minor')
+        )
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Extract Project Version
+        id: version
+        run: |
+          # Use Python to reliably extract version from pyproject.toml
+          python3 << 'PY'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          p = Path("pyproject.toml")
+          with p.open("rb") as f:
+              data = tomllib.load(f)
+              v = data["project"]["version"]
+          
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"tag=v{v}\n")
+          PY
+
+      - name: Generate Release Notes and Create Release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tagName = '${{ steps.version.outputs.tag }}';
+            const mergeSha = context.payload.pull_request.merge_commit_sha;
+            console.log(`Creating release for ${tagName} at commit ${mergeSha}...`);
+            
+            try {
+              // 1. Check if release already exists to be idempotent
+              try {
+                const existing = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: tagName
+                });
+                if (existing) {
+                  console.log(`⚠️ Release ${tagName} already exists. Skipping.`);
+                  return;
+                }
+              } catch (e) {
+                // Not found, proceed
+              }
+
+              // 2. Generate the release notes
+              const { data: notes } = await github.rest.repos.generateReleaseNotes({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tagName,
+                target_commitish: 'main'
+              });
+              
+              // 3. Create the GitHub release
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tagName,
+                name: tagName,
+                body: notes.body,
+                draft: false,
+                prerelease: false,
+                generate_release_notes: false,
+                target_commitish: mergeSha
+              });
+              
+              console.log(`✅ Successfully created release ${tagName}`);
+            } catch (error) {
+              console.error(`❌ Failed to create release: ${error.message}`);
+              core.setFailed(error.message);
+            }
