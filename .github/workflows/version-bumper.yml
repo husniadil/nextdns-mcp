@@ -64,19 +64,20 @@ jobs:
           print(f"Bumping {current_v} -> {next_v} (due to {LABEL})")
 
           # 3. Update files
-          def update_file(path, pattern, replacement):
+          def update_file(path, pattern, replacement, flags=0):
               p = PR_ROOT / path
               content = p.read_text()
-              new_content = re.sub(pattern, replacement, content)
+              new_content = re.sub(pattern, replacement, content, flags=flags)
               if content != new_content:
                   p.write_text(new_content)
                   print(f"✅ Updated {path}")
               else:
                   print(f"⚠️ No change needed for {path}")
 
-          update_file("pyproject.toml", r'^version\s*=\s*".*"', f'version = "{next_v}"')
-          update_file("src/nextdns_mcp/__init__.py", r'__version__ = ".*"', f'__version__ = "{next_v}"')
-          update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=".*"', f'LABEL org.opencontainers.image.version="{next_v}"')
+          # Use MULTILINE so ^ works at the start of any line
+          update_file("pyproject.toml", r'^version\s*=\s*".*"', f'version = "{next_v}"', flags=re.MULTILINE)
+          update_file("src/nextdns_mcp/__init__.py", r'__version__\s*=\s*["\'].*["\']', f'__version__ = "{next_v}"', flags=re.MULTILINE)
+          update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
           
           with open("next_version.txt", "w") as f:
               f.write(next_v)

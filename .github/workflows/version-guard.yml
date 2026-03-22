@@ -108,10 +108,21 @@ jobs:
               match = re.search(r'LABEL org\.opencontainers\.image\.version=["\']([^"\']+)["\']', content)
               return match.group(1) if match else None
 
+          def normalize_version(v: str):
+              """
+              Extract (major, minor, patch) as integers from a version string.
+              Handles suffixes like '-rc.1' by ignoring them for basic comparison.
+              """
+              match = re.match(r"^(\d+)\.(\d+)\.(\d+)", v)
+              if not match:
+                  return None
+              return tuple(int(x) for x in match.groups())
+
           def is_greater(v1, v2):
-              # Simple semver comparison for MAJOR.MINOR.PATCH
-              t1 = [int(x) for x in v1.split('.')]
-              t2 = [int(x) for x in v2.split('.')]
+              t1 = normalize_version(v1)
+              t2 = normalize_version(v2)
+              if t1 is None or t2 is None:
+                  return v1 > v2 # Fallback
               return t1 > t2
 
           try:

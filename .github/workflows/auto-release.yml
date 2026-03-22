@@ -10,20 +10,34 @@ permissions:
 
 jobs:
   release:
-    # Only run if merged and not a fork, and has exactly one valid bump label
+    # Only run if merged, not a fork, and has exactly one valid bump label (and no no-release label)
     if: |
       github.event.pull_request.merged == true &&
       !github.event.pull_request.head.repo.fork &&
+      !contains(github.event.pull_request.labels.*.name, 'no-release') &&
       (
-        (contains(github.event.pull_request.labels.*.name, 'bump-patch') ||
-         contains(github.event.pull_request.labels.*.name, 'bump-minor') ||
-         contains(github.event.pull_request.labels.*.name, 'bump-major')) &&
-        !contains(github.event.pull_request.labels.*.name, 'no-release')
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-major')
+        ) ||
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-major')
+        ) ||
+        (
+          contains(github.event.pull_request.labels.*.name, 'bump-major') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
+          !contains(github.event.pull_request.labels.*.name, 'bump-minor')
+        )
       )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Extract Project Version
         id: version
@@ -39,7 +53,7 @@ jobs:
           with p.open("rb") as f:
               data = tomllib.load(f)
               v = data["project"]["version"]
-
+          
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"tag=v{v}\n")
           PY
@@ -50,7 +64,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const tagName = '${{ steps.version.outputs.tag }}';
-            console.log(`Creating release for ${tagName}...`);
+            const mergeSha = context.payload.pull_request.merge_commit_sha;
+            console.log(`Creating release for ${tagName} at commit ${mergeSha}...`);
             
             try {
               // 1. Check if release already exists to be idempotent
@@ -85,7 +100,8 @@ jobs:
                 body: notes.body,
                 draft: false,
                 prerelease: false,
-                generate_release_notes: false
+                generate_release_notes: false,
+                target_commitish: mergeSha
               });
               
               console.log(`✅ Successfully created release ${tagName}`);
