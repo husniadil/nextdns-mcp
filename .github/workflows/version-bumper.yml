@@ -1,0 +1,102 @@
+name: Version Bumper (Auto-Sync)
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    # Only run on specific bump labels and avoid forks or already closed PRs
+    if: |
+      (github.event.label.name == 'bump-patch' || 
+       github.event.label.name == 'bump-minor' || 
+       github.event.label.name == 'bump-major') &&
+      github.event.pull_request.state == 'open' &&
+      !github.event.pull_request.head.repo.fork &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Checkout Main (Baseline)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-ref
+
+      - name: Calculate and Update Version
+        id: update_version
+        run: |
+          set -euo pipefail
+          
+          python3 << 'PY'
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          LABEL = "${{ github.event.label.name }}"
+          MAIN_ROOT = Path("main-ref")
+          PR_ROOT = Path(".")
+
+          # 1. Get current version from main (baseline)
+          with (MAIN_ROOT / "pyproject.toml").open("rb") as f:
+              data = tomllib.load(f)
+              current_v = data["project"]["version"]
+          
+          # 2. Calculate next version
+          major, minor, patch = map(int, current_v.split('.'))
+          if LABEL == 'bump-major':
+              major += 1; minor = 0; patch = 0
+          elif LABEL == 'bump-minor':
+              minor += 1; patch = 0
+          elif LABEL == 'bump-patch':
+              patch += 1
+          next_v = f"{major}.{minor}.{patch}"
+          
+          print(f"Bumping {current_v} -> {next_v} (due to {LABEL})")
+
+          # 3. Update files
+          def update_file(path, pattern, replacement, flags=0):
+              p = PR_ROOT / path
+              content = p.read_text()
+              new_content = re.sub(pattern, replacement, content, flags=flags)
+              if content != new_content:
+                  p.write_text(new_content)
+                  print(f"✅ Updated {path}")
+              else:
+                  print(f"⚠️ No change needed for {path}")
+
+          # Use MULTILINE so ^ works at the start of any line
+          update_file("pyproject.toml", r'^version\s*=\s*".*"', f'version = "{next_v}"', flags=re.MULTILINE)
+          update_file("src/nextdns_mcp/__init__.py", r'__version__\s*=\s*["\'].*["\']', f'__version__ = "{next_v}"', flags=re.MULTILINE)
+          update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
+          
+          with open("next_version.txt", "w") as f:
+              f.write(next_v)
+          PY
+          
+          NEXT_V=$(cat next_version.txt)
+          echo "next_version=$NEXT_V" >> $GITHUB_OUTPUT
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile
+          
+          # Check if there are any staged changes before committing
+          if git diff --cached --quiet; then
+            echo "No changes to commit; skipping commit and push."
+            exit 0
+          fi
+          
+          git commit -m "chore: bump version to ${{ steps.update_version.outputs.next_version }} (${{ github.event.label.name }})"
+          git push origin ${{ github.head_ref }}
